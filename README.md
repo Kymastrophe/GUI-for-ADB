@@ -142,7 +142,7 @@ adb_manager/
 ├── data/
 │   └── packages.json     # Local package name DB (auto-created)
 └── assets/
-    └── (icon.png, icon.ico — optional)
+    └── (optional for icons and stuff)
 ```
 
 ---
