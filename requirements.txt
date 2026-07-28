@@ -1,0 +1,11 @@
+# requirements.txt
+# Core GUI
+PyQt6>=6.6.0
+
+# QR code generation
+qrcode[pil]>=7.4.2
+Pillow>=10.0.0
+zeroconf>=0.80.0
+
+# Build (not needed at runtime)
+# pyinstaller>=6.0.0
