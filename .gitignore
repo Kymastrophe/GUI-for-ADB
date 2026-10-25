@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build output
+build/
+dist/
+
+# Local ADB binaries (download from Google, don't redistribute)
+adb
+adb.exe
+AdbWinApi.dll
+AdbWinUsbApi.dll
+
+# Editor / OS junk
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log

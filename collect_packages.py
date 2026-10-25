@@ -2,7 +2,8 @@
 """
 collect_packages.py
 
-Run this ONCE to build data/packages.json from all open-source debloat lists.
+Build or update data/packages.json from all open-source debloat lists.
+Existing names are merged in, so locally harvested entries are never lost.
 Requires internet access. Takes ~30 seconds.
 
 Usage:
@@ -11,8 +12,6 @@ Usage:
 
 import json
 import re
-import sys
-import os
 import argparse
 import urllib.request
 from pathlib import Path
@@ -101,8 +100,6 @@ def load_uad_ng(result: dict) -> int:
         name = clean_name(info.get("description", ""))
         if pkg not in result or not result[pkg]:
             result[pkg] = name or ""
-        elif name and not result[pkg]:
-            result[pkg] = name
         count += 1
     print(f"  ✓  {count:,} packages")
     return count
@@ -593,7 +590,6 @@ INLINE_PACKAGES: dict[str, str] = {
     "com.sec.spp.sync": "Samsung Sync",
     "com.sec.voiceassist": "Voice Assist",
     "com.samsungims": "Samsung IMS Service",
-    "com.samsung.android.easysetup": "Samsung Easy Setup",
 
     # ── Xiaomi / MIUI ────────────────────────────────────────────────────────
     "com.miui.analytics": "MIUI Analytics",
@@ -1269,8 +1265,15 @@ def collect(output_path: str | None = None, verbose: bool = True) -> dict[str, s
     log("=" * 60)
 
     # Remote sources
-    load_uad_ng(result)
-    load_muntashir_akon(result)
+    remote_entries = load_uad_ng(result)
+    remote_entries += load_muntashir_akon(result)
+
+    # Refuse to overwrite a good database with nothing when the network is down.
+    if remote_entries == 0:
+        raise RuntimeError(
+            "Could not download any package lists (no internet access?). "
+            "Existing database left unchanged."
+        )
 
     # Inline packages (override empties, don't overwrite good names)
     log("Merging inline vendor package list...")
@@ -1293,6 +1296,30 @@ def collect(output_path: str | None = None, verbose: bool = True) -> dict[str, s
             cleared += 1
     log(f"  ✓  Cleared {cleared:,} low-quality entries")
 
+    # Merge the existing database so locally harvested / previously fetched
+    # names are never lost when the remote lists change.
+    out = Path(output_path) if output_path else Path(__file__).parent / "data" / "packages.json"
+    merged = 0
+    try:
+        with open(out, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+        if isinstance(existing, dict):
+            for pkg, name in existing.items():
+                if not isinstance(pkg, str) or not isinstance(name, str):
+                    continue
+                if pkg not in result:
+                    result[pkg] = name
+                    merged += 1
+                elif not result[pkg] and name:
+                    result[pkg] = name
+                    merged += 1
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as e:
+        log(f"  !  Could not read existing database ({e}); skipping merge")
+    if merged:
+        log(f"  ✓  Kept {merged:,} existing entries")
+
     # Final stats
     named = {k: v for k, v in result.items() if v}
     log(f"\n{'='*60}")
@@ -1302,7 +1329,6 @@ def collect(output_path: str | None = None, verbose: bool = True) -> dict[str, s
     log(f"{'='*60}\n")
 
     # Save
-    out = Path(output_path) if output_path else Path(__file__).parent / "data" / "packages.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2, sort_keys=True)
@@ -1316,4 +1342,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build the ADB Manager package name database.")
     parser.add_argument("--output", "-o", default=None, help="Output path (default: data/packages.json)")
     args = parser.parse_args()
-    collect(output_path=args.output)
+    try:
+        collect(output_path=args.output)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(1) from None

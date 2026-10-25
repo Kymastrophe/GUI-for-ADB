@@ -1,6 +1,7 @@
 import sys
 import socket
-import random
+import secrets
+import shutil
 import string
 import subprocess
 import time
@@ -14,16 +15,15 @@ except ImportError:
 
 
 def _random_psk(length: int = 12) -> str:
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
 def _get_local_ip() -> str:
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
     except Exception:
         return "192.168.137.1"
 
@@ -115,7 +115,7 @@ class HotspotManager:
         return True, "Hotspot started (Windows)"
 
     def _start_linux(self) -> tuple[bool, str]:
-        if subprocess.run(["which", "nmcli"], capture_output=True).returncode != 0:
+        if shutil.which("nmcli") is None:
             return False, "nmcli not found. Install NetworkManager."
         name = self.ssid or "ADB-Manager"
         subprocess.run(["nmcli", "connection", "delete", name], capture_output=True)

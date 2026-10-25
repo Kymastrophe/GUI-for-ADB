@@ -6,16 +6,18 @@ import ipaddress
 import concurrent.futures
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
-from core.adb import ADB, run as adb_run, devices as adb_devices
+from core.adb import run as adb_run
 
 
-def mdns_find(timeout: int = 8) -> list[dict]:
+def mdns_find(timeout: int = 8, stop_event: Optional[threading.Event] = None) -> list[dict]:
     results = []
     deadline = time.time() + timeout
     seen = set()
     while time.time() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            break
         try:
             stdout, _, rc = adb_run(["mdns", "services"], timeout=4)
             for line in stdout.splitlines():
@@ -67,7 +69,8 @@ def _read_arp() -> list[str]:
     return list(set(ips))
 
 
-def _ping_sweep(subnet_ip: str, workers: int = 60) -> None:
+def _ping_sweep(subnet_ip: str, workers: int = 60,
+                stop_event: Optional[threading.Event] = None) -> None:
     try:
         net = ipaddress.IPv4Network(subnet_ip + "/24", strict=False)
         hosts = [str(h) for h in net.hosts() if str(h) != subnet_ip]
@@ -75,6 +78,8 @@ def _ping_sweep(subnet_ip: str, workers: int = 60) -> None:
         return
 
     def _ping(ip):
+        if stop_event is not None and stop_event.is_set():
+            return
         try:
             if sys.platform.startswith("win"):
                 subprocess.run(
@@ -95,10 +100,9 @@ def _ping_sweep(subnet_ip: str, workers: int = 60) -> None:
 
 def _try_adb_connect(ip: str, port: int = 5555, timeout: int = 3) -> Optional[str]:
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect((ip, port))
-        s.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((ip, port))
     except Exception:
         return None
 
@@ -109,22 +113,25 @@ def _try_adb_connect(ip: str, port: int = 5555, timeout: int = 3) -> Optional[st
     return None
 
 
-def arp_find(our_ip: str, connect_port: int = 5555, timeout: int = 15) -> list[dict]:
+def arp_find(our_ip: str, connect_port: int = 5555, timeout: int = 15,
+             stop_event: Optional[threading.Event] = None) -> list[dict]:
     sweep_thread = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    sweep_thread.submit(_ping_sweep, our_ip)
+    sweep_thread.submit(_ping_sweep, our_ip, 60, stop_event)
 
     deadline = time.time() + timeout
     found = []
     seen_ips = {our_ip}
 
     while time.time() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            break
         arp_ips = _read_arp()
         new_ips = [ip for ip in arp_ips if ip not in seen_ips]
 
         if new_ips:
             with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
                 results = list(ex.map(lambda ip: _try_adb_connect(ip, connect_port), new_ips))
-            for ip, serial in zip(new_ips, results):
+            for ip, serial in zip(new_ips, results, strict=True):
                 seen_ips.add(ip)
                 if serial:
                     found.append({"ip": ip, "port": connect_port, "serial": serial})
@@ -141,7 +148,8 @@ def find_phone(
     our_ip: Optional[str] = None,
     connect_port: int = 5555,
     timeout: int = 30,
-    on_status: Optional[callable] = None,
+    on_status: Optional[Callable[[str], None]] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> Optional[dict]:
     def emit(msg):
         if on_status:
@@ -155,15 +163,18 @@ def find_phone(
 
     def try_mdns():
         emit("Checking mDNS (adb mdns services)…")
-        hits = mdns_find(timeout=min(timeout, 10))
+        hits = mdns_find(timeout=min(timeout, 10), stop_event=stop_event)
         if hits and not done.is_set():
             done.set()
             result_holder.append(hits[0])
 
     def try_arp():
         time.sleep(1)
+        if stop_event is not None and stop_event.is_set():
+            return
         emit("Scanning subnet via ARP…")
-        hits = arp_find(our_ip, connect_port=connect_port, timeout=timeout - 2)
+        hits = arp_find(our_ip, connect_port=connect_port, timeout=max(timeout - 2, 1),
+                        stop_event=stop_event)
         if hits and not done.is_set():
             done.set()
             result_holder.append(hits[0])
@@ -175,5 +186,10 @@ def find_phone(
     for t in threads:
         t.start()
 
-    done.wait(timeout=timeout)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if done.wait(0.2):
+            break
+        if stop_event is not None and stop_event.is_set():
+            break
     return result_holder[0] if result_holder else None

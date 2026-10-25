@@ -5,9 +5,10 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
-from PyQt6.QtGui import QFont, QColor, QTextCursor, QKeyEvent
+from PyQt6.QtGui import QColor, QTextCursor, QKeyEvent
 
 from core import adb
+from ui.theme import mono_font, theme
 
 _ANSI_RE = _re.compile(r'\x1b\[[0-9;]*m')
 
@@ -72,20 +73,22 @@ class HistoryLineEdit(QLineEdit):
 class TerminalTab(QWidget):
     log_message = pyqtSignal(str)
 
-    COLORS = {
-        "stdout": "#e8e8e8",
-        "stderr": "#ff7777",
-        "info":   "#88ccff",
-        "cmd":    "#88ff88",
-        "rc_ok":  "#44bb44",
-        "rc_err": "#ff5555",
+    COLOR_KEYS = {
+        "stdout": "text",
+        "stderr": "danger",
+        "info":   "info",
+        "cmd":    "accent",
+        "rc_ok":  "success",
+        "rc_err": "danger",
     }
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._shell_threads: list[QThread]     = []
         self._shell_workers: list[ShellRunner] = []
+        self._history: list[tuple[str, str]]    = []
         self._build_ui()
+        theme.changed.connect(self._apply_theme)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -99,15 +102,18 @@ class TerminalTab(QWidget):
         ll.setContentsMargins(0, 0, 0, 0)
 
         self._output = QTextEdit()
+        self._output.setObjectName("terminalOutput")
         self._output.setReadOnly(True)
-        mono = QFont("Courier New", 10)
-        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono = mono_font(10)
         self._output.setFont(mono)
-        self._output.setStyleSheet("background:#1a1a1a; color:#e8e8e8;")
+        self._output.document().setMaximumBlockCount(5000)
         ll.addWidget(self._output)
 
         cmd_row = QHBoxLayout()
         self._root_check = QCheckBox("su (root)")
+        self._root_check.toggled.connect(
+            lambda on: self._prompt_label.setText("#" if on else "$")
+        )
         cmd_row.addWidget(self._root_check)
 
         self._prompt_label = QLabel("$")
@@ -115,8 +121,8 @@ class TerminalTab(QWidget):
         cmd_row.addWidget(self._prompt_label)
 
         self._input = HistoryLineEdit()
+        self._input.setObjectName("terminalInput")
         self._input.setFont(mono)
-        self._input.setStyleSheet("background:#111; color:#e8e8e8; border:1px solid #444;")
         self._input.setPlaceholderText("Enter adb shell command…")
         self._input.returnPressed.connect(self._run_cmd)
         cmd_row.addWidget(self._input, stretch=1)
@@ -126,7 +132,7 @@ class TerminalTab(QWidget):
         cmd_row.addWidget(run_btn)
 
         clear_btn = QPushButton("Clear")
-        clear_btn.clicked.connect(self._output.clear)
+        clear_btn.clicked.connect(self._clear_output)
         cmd_row.addWidget(clear_btn)
 
         ll.addLayout(cmd_row)
@@ -212,10 +218,10 @@ class TerminalTab(QWidget):
         thread.start()
 
     def _cleanup_threads(self):
-        alive_threads  = [t for t in self._shell_threads if t.isRunning()]
-        alive_workers  = [w for t, w in zip(self._shell_threads, self._shell_workers) if t.isRunning()]
-        self._shell_threads = alive_threads
-        self._shell_workers = alive_workers
+        alive = [(t, w) for t, w in zip(self._shell_threads, self._shell_workers, strict=True)
+                 if t.isRunning()]
+        self._shell_threads = [t for t, _ in alive]
+        self._shell_workers = [w for _, w in alive]
 
     def _on_cmd_finished(self, rc: int):
         self._append(f"[exit {rc}]", "rc_ok" if rc == 0 else "rc_err")
@@ -231,13 +237,34 @@ class TerminalTab(QWidget):
             self._custom_quick.clear()
 
     def _append(self, text: str, kind: str = "stdout"):
-        text  = strip_ansi(text)
-        color = self.COLORS.get(kind, "#e8e8e8")
+        text = strip_ansi(text).rstrip("\n")
+        self._history.append((text, kind))
+        if len(self._history) > 5000:
+            del self._history[:len(self._history) - 5000]
+        self._append_line(text, kind)
+
+    def _append_line(self, text: str, kind: str, scroll: bool = True):
+        color = theme.color(self.COLOR_KEYS.get(kind, "text"))
         cursor = self._output.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         fmt = cursor.charFormat()
         fmt.setForeground(QColor(color))
         cursor.setCharFormat(fmt)
-        cursor.insertText(text.rstrip("\n") + "\n")
+        cursor.insertText(text + "\n")
         self._output.setTextCursor(cursor)
+        if scroll:
+            self._output.ensureCursorVisible()
+
+    def _clear_output(self):
+        self._history.clear()
+        self._output.clear()
+
+    def _apply_theme(self, _name: str = ""):
+        if not self._history:
+            return
+        self._output.setUpdatesEnabled(False)
+        self._output.clear()
+        for text, kind in self._history:
+            self._append_line(text, kind, scroll=False)
+        self._output.setUpdatesEnabled(True)
         self._output.ensureCursorVisible()

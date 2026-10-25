@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QPoint
 from PyQt6.QtGui import QColor
 
 from core import adb, package_db
+from ui.theme import theme
 
 
 class PackageLoader(QObject):
@@ -78,6 +79,7 @@ class PackagesTab(QWidget):
         self._harvest_thread: QThread              | None = None
         self._harvest_worker: DeviceHarvestWorker  | None = None
         self._build_ui()
+        theme.changed.connect(self._apply_theme)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -98,7 +100,10 @@ class PackagesTab(QWidget):
         bar.addWidget(self._refresh_btn)
 
         self._update_db_btn = QPushButton("⬇  Update Name DB")
-        self._update_db_btn.setToolTip("Download 5,900+ package names from the internet (once).")
+        self._update_db_btn.setToolTip(
+            "Download package→name mappings and merge them into the local DB.\n"
+            f"DB: {package_db.db_path()}"
+        )
         self._update_db_btn.clicked.connect(self._update_db)
         bar.addWidget(self._update_db_btn)
 
@@ -128,7 +133,7 @@ class PackagesTab(QWidget):
 
         row1 = QHBoxLayout()
         row1_lbl = QLabel("No root needed:")
-        row1_lbl.setStyleSheet("color:#a6adc8; font-size:11px;")
+        row1_lbl.setObjectName("smallLabel")
         row1.addWidget(row1_lbl)
 
         self._user_uninstall_btn = QPushButton("🗑  Remove for User")
@@ -166,7 +171,7 @@ class PackagesTab(QWidget):
 
         row2 = QHBoxLayout()
         row2_lbl = QLabel("Root / other:")
-        row2_lbl.setStyleSheet("color:#a6adc8; font-size:11px;")
+        row2_lbl.setObjectName("smallLabel")
         row2.addWidget(row2_lbl)
 
         self._uninstall_btn = QPushButton("🗑  Uninstall (root)")
@@ -186,6 +191,7 @@ class PackagesTab(QWidget):
         root.addLayout(row2)
 
         self._status = QLabel("Not loaded. Click Refresh.")
+        self._status.setObjectName("mutedLabel")
         root.addWidget(self._status)
 
     def refresh(self):
@@ -213,7 +219,7 @@ class PackagesTab(QWidget):
 
     def _on_loaded(self, rows: list[dict]):
         self._all_rows = rows
-        self._render(rows)
+        self._filter(self._search.text())
         self._progress.setVisible(False)
         self._refresh_btn.setEnabled(True)
         self._status.setText(
@@ -222,19 +228,38 @@ class PackagesTab(QWidget):
 
     def _render(self, rows: list[dict]):
         self._table.setSortingEnabled(False)
+        self._table.setUpdatesEnabled(False)
         self._table.setRowCount(len(rows))
         for i, row in enumerate(rows):
             pkg  = row["package"]
             name = row.get("name")
             name_cell = QTableWidgetItem(name if name else f"[{pkg}]")
+            name_cell.setData(Qt.ItemDataRole.UserRole, bool(name))
             if not name:
-                name_cell.setForeground(QColor("#888888"))
+                name_cell.setForeground(theme.qcolor("subtle"))
             self._table.setItem(i, COL_NAME, name_cell)
             pkg_item = QTableWidgetItem(pkg)
             pkg_item.setData(Qt.ItemDataRole.UserRole, pkg)
             self._table.setItem(i, COL_PKG, pkg_item)
             self._table.setItem(i, COL_STATUS, QTableWidgetItem(""))
+        self._table.setUpdatesEnabled(True)
         self._table.setSortingEnabled(True)
+
+    def _apply_theme(self, _name: str = ""):
+        for r in range(self._table.rowCount()):
+            name_item = self._table.item(r, COL_NAME)
+            if name_item:
+                known = bool(name_item.data(Qt.ItemDataRole.UserRole))
+                name_item.setForeground(theme.qcolor("text" if known else "subtle"))
+            status_item = self._table.item(r, COL_STATUS)
+            if status_item and status_item.text():
+                text = status_item.text()
+                if text.startswith("✓"):
+                    status_item.setForeground(theme.qcolor("success"))
+                elif text.startswith("✗"):
+                    status_item.setForeground(theme.qcolor("danger"))
+                else:
+                    status_item.setForeground(theme.qcolor("text"))
 
     def _filter(self, text: str):
         text = text.lower()
@@ -264,11 +289,11 @@ class PackagesTab(QWidget):
 
     def _handle_result(self, pkg: str, ok: bool, out: str, ok_label: str, fail_label: str = "✗ Failed"):
         if not ok and "root not available" in out.lower():
-            self._set_row_status(pkg, "✗ No root", "#cc4444")
+            self._set_row_status(pkg, "✗ No root", theme.color("danger"))
             self.log_message.emit(f"{pkg}: needs root")
         else:
             label = ok_label if ok else f"{fail_label}: {out[:35]}"
-            color = "#44bb44" if ok else "#cc4444"
+            color = theme.color("success" if ok else "danger")
             self._set_row_status(pkg, label, color)
             self.log_message.emit(f"{pkg}: {out.strip()}")
 
@@ -340,6 +365,11 @@ class PackagesTab(QWidget):
             webbrowser.open(f"https://google.com/search?q={pkg}+android+package")
 
     def _context_menu(self, pos: QPoint):
+        index = self._table.indexAt(pos)
+        if index.isValid() and not self._table.selectionModel().isRowSelected(
+            index.row(), index.parent()
+        ):
+            self._table.selectRow(index.row())
         if not self._selected_packages():
             return
         menu = QMenu(self)
@@ -361,8 +391,9 @@ class PackagesTab(QWidget):
     def _update_db(self):
         if QMessageBox.question(
             self, "Update Package Name DB",
-            "Download package→name mappings from the internet\n"
-            "and save locally. Only needs to be done once.\n\nContinue?"
+            "Download package→name mappings from the internet and merge them\n"
+            "into the local database. Existing and device-harvested names are kept.\n\n"
+            "Continue?"
         ) != QMessageBox.StandardButton.Yes:
             return
         if self._db_thread and self._db_thread.isRunning():
@@ -383,6 +414,11 @@ class PackagesTab(QWidget):
     def _on_db_done(self, ok: bool, msg: str):
         self._status.setText(msg)
         self._update_db_btn.setEnabled(True)
+        if ok and self._all_rows:
+            names = package_db.lookup_all([r["package"] for r in self._all_rows])
+            for row in self._all_rows:
+                row["name"] = names.get(row["package"])
+            self._filter(self._search.text())
 
     def _harvest_device(self):
         if not adb.is_connected():
@@ -405,8 +441,9 @@ class PackagesTab(QWidget):
 
     def _on_harvest_done(self, added: int, msg: str):
         self._status.setText(msg)
+        self.log_message.emit(msg)
         self._harvest_btn.setEnabled(True)
-        if added > 0 and self._all_rows:
+        if self._all_rows:
             names = package_db.lookup_all([r["package"] for r in self._all_rows])
             for row in self._all_rows:
                 row["name"] = names.get(row["package"])

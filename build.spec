@@ -1,7 +1,7 @@
 # build.spec  —  Single-file executable, size-optimised
 #
 # Usage:
-#   pip install pyinstaller pyqt6 qrcode pillow zeroconf
+#   pip install pyinstaller pyqt6 qrcode pillow
 #   pyinstaller build.spec
 #
 # Output: dist/ADBManager  (Linux/macOS)  or  dist/ADBManager.exe  (Windows)
@@ -10,10 +10,8 @@
 # it is on the user's PATH at runtime.
 
 import sys
-import os
 from pathlib import Path
 
-block_cipher = None
 HERE = Path(SPEC).parent
 
 # ── ADB binary (optional bundle) ─────────────────────────────────────────────
@@ -24,9 +22,11 @@ binaries  = [(str(_adb_src), ".")] if _adb_src.exists() else []
 # ── Data files ────────────────────────────────────────────────────────────────
 datas = [
     (str(HERE / "data"),               "data"),
-    (str(HERE / "assets"),             "assets"),
     (str(HERE / "collect_packages.py"),"." ),
 ]
+_assets = HERE / "assets"
+if _assets.is_dir():
+    datas.append((str(_assets), "assets"))
 
 # ── Hidden imports (things PyInstaller misses) ────────────────────────────────
 hiddenimports = [
@@ -39,11 +39,7 @@ hiddenimports = [
     "PIL",
     "PIL.Image",
     "PIL.PngImagePlugin",
-    "zeroconf",
-    "zeroconf._utils.ipaddress",
-    "zeroconf._dns",
-    "zeroconf._services",
-    "zeroconf._services.info",
+    "collect_packages",
     "concurrent.futures",
     "zipfile",
     "tempfile",
@@ -75,7 +71,7 @@ excludes = [
     "PIL.BmpImagePlugin", "PIL.GifImagePlugin",
     "PIL.JpegImagePlugin", "PIL.TiffImagePlugin",
     # Unused stdlib
-    "email", "html", "xml", "xmlrpc",
+    "html", "xml", "xmlrpc",
     "ftplib", "imaplib", "poplib", "smtplib",
     "telnetlib", "nntplib",
     "curses", "readline", "rlcompleter",
@@ -95,9 +91,6 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=excludes,
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
@@ -112,7 +105,7 @@ def _keep_binary(name: str) -> bool:
     if "platforms" in name_l:
         keep_platforms = {"xcb", "cocoa", "qwindows", "minimal", "offscreen"}
         return any(p in name_l for p in keep_platforms)
-    # Styles: only fusion (our dark theme uses it)
+    # Styles: only fusion (our light/dark themes use it)
     if "styles" in name_l:
         return "fusion" in name_l
     # Image formats: only png (for QR codes)
@@ -126,7 +119,7 @@ a.binaries = TOC(
      if _keep_binary(name)]
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 # ── Single-file EXE ───────────────────────────────────────────────────────────
 exe = EXE(
@@ -153,6 +146,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    onefile=True,
     icon=str(HERE / "assets" / "icon.ico") if (HERE / "assets" / "icon.ico").exists() else None,
 )

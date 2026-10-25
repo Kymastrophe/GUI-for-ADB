@@ -10,9 +10,10 @@ from PyQt6.QtWidgets import (
     QFileDialog, QCheckBox, QAbstractItemView, QGroupBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
-from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QTextCharFormat, QTextCursor
 
 from core import adb
+from ui.theme import mono_font, theme
 
 
 class InstallWorker(QObject):
@@ -24,7 +25,6 @@ class InstallWorker(QObject):
         self.jobs      = jobs
         self.reinstall = reinstall
         self.downgrade = downgrade
-
     def run(self):
         for job in self.jobs:
             label = job["label"]
@@ -123,18 +123,25 @@ class SideloadTab(QWidget):
         self._worker:    InstallWorker | None = None
         self._thread:    QThread       | None = None
         self._completed: int           = 0
+        self._install_total: int       = 0
+        self._log_history: list[tuple[str, str | None]] = []
         self._build_ui()
+        theme.changed.connect(self._apply_theme)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setSpacing(8)
 
+        title = QLabel("Install packages")
+        title.setObjectName("sectionLabel")
+        root.addWidget(title)
+
         hdr = QLabel("Drag & drop APK files here, or use the Add button.")
-        hdr.setStyleSheet("color:#a6adc8;")
+        hdr.setObjectName("mutedLabel")
         root.addWidget(hdr)
 
         sup = QLabel(f"Supported: {', '.join(SUPPORTED)}")
-        sup.setStyleSheet("color:#585b70; font-size:11px;")
+        sup.setObjectName("smallLabel")
         root.addWidget(sup)
 
         self._list = DropList()
@@ -167,10 +174,7 @@ class SideloadTab(QWidget):
         root.addWidget(opt_box)
 
         self._install_btn = QPushButton("⚡  Install All")
-        self._install_btn.setStyleSheet(
-            "QPushButton { background:#313244; font-size:14px; padding:8px; }"
-            "QPushButton:hover { background:#45475a; border-color:#a6e3a1; }"
-        )
+        self._install_btn.setObjectName("primaryButton")
         self._install_btn.clicked.connect(self._install_all)
         root.addWidget(self._install_btn)
 
@@ -180,12 +184,11 @@ class SideloadTab(QWidget):
         root.addWidget(self._progress)
 
         self._log = QTextEdit()
+        self._log.setObjectName("logView")
         self._log.setReadOnly(True)
         self._log.setMaximumHeight(140)
-        self._log.setStyleSheet(
-            "background:#181825; color:#cdd6f4; "
-            "font-family: 'Courier New', monospace; font-size: 12px;"
-        )
+        self._log.document().setMaximumBlockCount(500)
+        self._log.setFont(mono_font(10))
         root.addWidget(self._log)
 
     def _browse(self):
@@ -207,6 +210,7 @@ class SideloadTab(QWidget):
                 self._log_line(f"Skipped (unsupported): {label}", error=True)
                 continue
             self._jobs.append({"label": label, "path": path, "type": ext})
+            existing.add(path)
             item = QListWidgetItem(f"{self._type_icon(ext)}  {label}")
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setToolTip(path)
@@ -243,9 +247,11 @@ class SideloadTab(QWidget):
 
         self._install_btn.setEnabled(False)
         self._progress.setVisible(True)
-        self._progress.setRange(0, len(self._jobs))
+        self._install_total = len(self._jobs)
+        self._progress.setRange(0, self._install_total)
         self._progress.setValue(0)
         self._log.clear()
+        self._log_history.clear()
         self._completed = 0
 
         self._worker = InstallWorker(
@@ -268,25 +274,50 @@ class SideloadTab(QWidget):
         self._completed += 1
         self._progress.setValue(self._completed)
         icon  = "✓" if ok else "✗"
-        color = "#a6e3a1" if ok else "#f38ba8"
-        self._log_line(f"{icon} {label}: {msg}", color=color)
+        tone  = "success" if ok else "danger"
+        self._log_line(f"{icon} {label}: {msg}", tone=tone)
         self.log_message.emit(f"Install {label}: {'OK' if ok else msg}")
 
         for i in range(self._list.count()):
             item = self._list.item(i)
             if item and Path(item.data(Qt.ItemDataRole.UserRole)).name == label:
-                item.setForeground(QColor("#a6e3a1" if ok else "#f38ba8"))
+                item.setData(Qt.ItemDataRole.UserRole + 1, tone)
+                item.setForeground(theme.qcolor(tone))
 
     def _check_all_done(self):
-        if self._completed >= len(self._jobs):
+        if self._completed >= self._install_total:
             self._install_btn.setEnabled(True)
             self._progress.setVisible(False)
             self._log_line(f"Done. {self._completed} file(s) processed.")
             if self._thread:
                 self._thread.quit()
 
-    def _log_line(self, text: str, error: bool = False, color: str = ""):
-        c = color or ("#f38ba8" if error else "#cdd6f4")
-        self._log.setTextColor(QColor(c))
-        self._log.append(text)
-        self._log.setTextColor(QColor("#cdd6f4"))
+    def _log_line(self, text: str, error: bool = False, tone: str | None = None):
+        tone = tone or ("danger" if error else None)
+        self._log_history.append((text, tone))
+        if len(self._log_history) > 500:
+            del self._log_history[:len(self._log_history) - 500]
+        self._write_log_line(text, tone)
+
+    def _write_log_line(self, text: str, tone: str | None, scroll: bool = True):
+        cursor = self._log.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        fmt = QTextCharFormat()
+        fmt.setForeground(theme.qcolor(tone or "text"))
+        cursor.insertText(text + "\n", fmt)
+        self._log.setTextCursor(cursor)
+        if scroll:
+            self._log.ensureCursorVisible()
+
+    def _apply_theme(self, _name: str = ""):
+        self._log.setUpdatesEnabled(False)
+        self._log.clear()
+        for text, tone in self._log_history:
+            self._write_log_line(text, tone, scroll=False)
+        self._log.setUpdatesEnabled(True)
+        self._log.ensureCursorVisible()
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            tone = item.data(Qt.ItemDataRole.UserRole + 1)
+            if tone:
+                item.setForeground(theme.qcolor(tone))

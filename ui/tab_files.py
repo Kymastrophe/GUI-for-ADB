@@ -5,9 +5,9 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QProgressBar, QAbstractItemView, QMenu,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QPoint, QTimer
-from PyQt6.QtGui import QColor
 
 from core import adb
+from ui.theme import theme
 
 _CHUNK = 200
 
@@ -72,6 +72,7 @@ class FilesTab(QWidget):
         self._xfer_thread: QThread        | None = None
         self._xfer_worker: TransferWorker | None = None
         self._build_ui()
+        theme.changed.connect(self._apply_theme)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -95,8 +96,8 @@ class FilesTab(QWidget):
         go_btn.clicked.connect(self._go_to_path_edit)
         nav.addWidget(go_btn)
 
-        ref_btn = QPushButton("↻")
-        ref_btn.setMaximumWidth(32)
+        ref_btn = QPushButton("Refresh")
+        ref_btn.setToolTip("Reload the current directory")
         ref_btn.clicked.connect(self._reload_current)
         nav.addWidget(ref_btn)
         root.addLayout(nav)
@@ -138,6 +139,7 @@ class FilesTab(QWidget):
         act.addWidget(del_btn)
         act.addStretch()
         self._status = QLabel("Browse device filesystem above.")
+        self._status.setObjectName("mutedLabel")
         act.addWidget(self._status)
         root.addLayout(act)
 
@@ -197,6 +199,7 @@ class FilesTab(QWidget):
         self._status.setText(f"Loading {path}…")
         self._progress.setVisible(True)
         self._progress.setRange(0, 0)
+        self._table.setUpdatesEnabled(True)
         self._table.setRowCount(0)
 
         worker = DirLoader(path, token)
@@ -229,9 +232,12 @@ class FilesTab(QWidget):
         self._chunk_offset    = 0
         self._table.setUpdatesEnabled(False)
         self._table.setRowCount(len(ordered))
-        self._fill_chunk()
+        self._fill_chunk(token)
 
-    def _fill_chunk(self):
+    def _fill_chunk(self, token: int):
+        if token != self._load_token:
+            return
+
         entries = self._pending_entries
         path    = self._pending_path
         start   = self._chunk_offset
@@ -248,7 +254,7 @@ class FilesTab(QWidget):
             name_item.setData(Qt.ItemDataRole.UserRole, full)
             name_item.setData(Qt.ItemDataRole.UserRole + 1, "dir" if is_dir else "file")
             if is_dir:
-                name_item.setForeground(QColor("#88aaff"))
+                name_item.setForeground(theme.qcolor("info"))
             self._table.setItem(i, COL_NAME,  name_item)
             self._table.setItem(i, COL_SIZE,  QTableWidgetItem(e.get("size", "")))
             self._table.setItem(i, COL_PERMS, QTableWidgetItem(e.get("perms", "")))
@@ -256,10 +262,16 @@ class FilesTab(QWidget):
         self._chunk_offset = end
 
         if end < len(entries):
-            QTimer.singleShot(0, self._fill_chunk)
+            QTimer.singleShot(0, lambda: self._fill_chunk(token))
         else:
             self._table.setUpdatesEnabled(True)
             self._status.setText(f"{path}  —  {len(entries)} item(s)")
+
+    def _apply_theme(self, _name: str = ""):
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, COL_NAME)
+            if item and item.data(Qt.ItemDataRole.UserRole + 1) == "dir":
+                item.setForeground(theme.qcolor("info"))
 
     def _selected_paths(self) -> list[str]:
         rows = set(idx.row() for idx in self._table.selectedIndexes())
@@ -294,7 +306,7 @@ class FilesTab(QWidget):
             return
         if QMessageBox.question(
             self, "Confirm Delete",
-            f"Delete {len(paths)} item(s)?\nUses root — cannot be undone.",
+            f"Delete {len(paths)} item(s)?\nThis cannot be undone.",
         ) != QMessageBox.StandardButton.Yes:
             return
         for p in paths:
@@ -321,11 +333,16 @@ class FilesTab(QWidget):
         self.log_message.emit(f"Transfer: {msg}")
 
     def _ctx_menu(self, pos: QPoint):
+        index = self._table.indexAt(pos)
+        if index.isValid() and not self._table.selectionModel().isRowSelected(
+            index.row(), index.parent()
+        ):
+            self._table.selectRow(index.row())
         if not self._selected_paths():
             return
         m = QMenu(self)
         m.addAction("Pull to PC").triggered.connect(self._pull)
-        m.addAction("Delete (root)").triggered.connect(self._delete)
+        m.addAction("Delete").triggered.connect(self._delete)
         m.exec(self._table.viewport().mapToGlobal(pos))
 
     def showEvent(self, event):
